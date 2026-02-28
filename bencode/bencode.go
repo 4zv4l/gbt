@@ -46,6 +46,7 @@ func decode(r *bufio.Reader) (any, error) {
 				r.ReadByte()
 				break
 			}
+
 			val, err := decode(r)
 			if err != nil {
 				return nil, err
@@ -61,6 +62,7 @@ func decode(r *bufio.Reader) (any, error) {
 				r.ReadByte()
 				break
 			}
+
 			key, err := decode(r)
 			if err != nil {
 				return nil, err
@@ -70,7 +72,6 @@ func decode(r *bufio.Reader) (any, error) {
 			if err != nil {
 				return nil, err
 			}
-
 			dict[key.(string)] = val
 		}
 		return dict, nil
@@ -84,9 +85,11 @@ func encode(w *bufio.Writer, v any) error {
 	case int:
 		_, err := fmt.Fprintf(w, "i%de", val)
 		return err
+
 	case string:
 		_, err := fmt.Fprintf(w, "%d:%s", len(val), val)
 		return err
+
 	case []any:
 		fmt.Fprint(w, "l")
 		for _, item := range val {
@@ -96,6 +99,7 @@ func encode(w *bufio.Writer, v any) error {
 		}
 		_, err := fmt.Fprint(w, "e")
 		return err
+
 	case map[string]any:
 		fmt.Fprint(w, "d")
 		keys := make([]string, 0, len(val))
@@ -114,6 +118,7 @@ func encode(w *bufio.Writer, v any) error {
 		}
 		_, err := fmt.Fprint(w, "e")
 		return err
+
 	default:
 		return fmt.Errorf("unsupported type: %T", v)
 	}
