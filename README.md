@@ -1,4 +1,4 @@
-# GoTorrent (WIP)
+# Go BitTorrent (WIP)
 
 In construction: learning how to build a dead-simple BitTorrent client from scratch (only stdlib) in Go.  
 The goal is to build a minimalist, concurrent CLI client that handles the BitTorrent protocol.
