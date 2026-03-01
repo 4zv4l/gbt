@@ -3,14 +3,16 @@
 In construction: learning how to build a dead-simple BitTorrent client from scratch (only stdlib) in Go.  
 The goal is to build a minimalist, concurrent CLI client that handles the BitTorrent protocol.
 
-## Current Phase: 
-
-### 1. The Base Client:
+## TODO
 
 - [X] Parse Bencode `.torrent` files
-- [ ] Communicate with HTTP Trackers
-- [ ] Handle TCP Peer Handshakes
+- [X] Request tracker for peers
+- [X] Handle TCP Peer Handshakes
+- [ ] Asking tracker for more peers
+- [ ] Handle Chocking/Unchocking state
 - [ ] Download and verify piece hashes
+- [ ] Support DHT and magnet link ?
+- [ ] Optimize the whole thing
 
 ## Testing
 
