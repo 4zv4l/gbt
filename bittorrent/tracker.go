@@ -11,8 +11,8 @@ import (
 )
 
 type TrackerReply struct {
-	interval int
-	peers    []netip.AddrPort
+	Interval int
+	Peers    []netip.AddrPort
 }
 
 // each peer is 6 bytes (4 bytes IP + 2 bytes Port)
@@ -51,7 +51,7 @@ func GetPeersFromTracker(trackerUrl string) (TrackerReply, error) {
 	}
 
 	return TrackerReply{
-		interval: reply["interval"].(int),
-		peers:    rawPeersToAddrPort([]byte(reply["peers"].(string))),
+		Interval: reply["interval"].(int),
+		Peers:    rawPeersToAddrPort([]byte(reply["peers"].(string))),
 	}, nil
 }
