@@ -8,6 +8,8 @@ import (
 	"crypto/sha1"
 	"errors"
 	"fmt"
+	"net/url"
+	"strconv"
 
 	"github.com/4zv4l/gbt/bencode"
 )
@@ -108,6 +110,24 @@ func Parse(data []byte) (*TorrentFile, error) {
 		Files:       files,
 		TotalLength: totalLength,
 	}, nil
+}
+
+// generate the url to send to the track to get peers
+func (t *TorrentFile) TrackerURL(peerID [20]byte) (string, error) {
+	uri, err := url.Parse(t.Announce)
+	if err != nil {
+		return "", err
+	}
+	uri.RawQuery = url.Values{
+		"info_hash":  []string{string(t.InfoHash[:])},
+		"peer_id":    []string{string(peerID[:])},
+		"port":       []string{uri.Port()},
+		"uploaded":   []string{"0"},
+		"downloaded": []string{"0"},
+		"compact":    []string{"1"},
+		"left":       []string{strconv.Itoa(t.TotalLength)},
+	}.Encode()
+	return uri.String(), nil
 }
 
 // calculateInfoHash re-encodes the info dictionary and calculates its SHA-1 hash.
