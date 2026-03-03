@@ -2,73 +2,109 @@ package bittorrent
 
 import (
 	"fmt"
+	"crypto/sha1"
+	"io"
+	"log/slog"
 	"net"
 	"net/netip"
 	"time"
 )
 
-type Handshake struct {
-	Length   uint8 // value should always be 19
-	Pstr     string
-	ExtFlag  [8]byte
-	InfoHash [20]byte
-	PeerID   [20]byte
+// DownloadCtx is used as context when downloading chunk from a client
+type DownloadCtx struct {
+	Index int
+	Bytes []byte
+	Sha1sum [20]byte
 }
 
-func (h Handshake) ToByte() []byte {
-	var buf []byte
-	buf = append(buf, byte(h.Length))
-	buf = append(buf, h.Pstr[:]...)
-	buf = append(buf, h.ExtFlag[:]...)
-	buf = append(buf, h.InfoHash[:]...)
-	buf = append(buf, h.PeerID[:]...)
-	return buf
-}
-
-func HandshakeFromByte(rawHandshake []byte) Handshake {
-	return Handshake{
-		Length:   rawHandshake[0],
-		Pstr:     string(rawHandshake[1:20]),
-		ExtFlag:  [8]byte(rawHandshake[20:28]),
-		InfoHash: [20]byte(rawHandshake[28:48]),
-		PeerID:   [20]byte(rawHandshake[48:68]),
+func handleHandshake(conn net.Conn, infohash, peerID [20]byte) error {
+	var buf [68]byte
+	_, err := conn.Write(MakeHandshake(infohash, peerID).ToByte())
+	if err != nil {
+		return err
 	}
-}
-
-func MakeHandshake(infohash, peerID [20]byte) Handshake {
-	return Handshake{
-		Length:   19,
-		Pstr:     "BitTorrent protocol",
-		InfoHash: infohash,
-		PeerID:   peerID,
+	len, err := io.ReadFull(conn, buf[:])
+	if err != nil {
+		return err
 	}
+	handshake := HandshakeFromByte(buf[:len])
+	if handshake.InfoHash != infohash {
+		return fmt.Errorf("HandlePeer(): infohash doesnt match")
+	}
+	slog.Info("handshake made", "handshake", handshake)
+	return nil
 }
 
-func HandlePeer(peer netip.AddrPort, infohash, peerID [20]byte) (*string, error) {
+// DownloadFromPeer will try to download a piece from a peer
+func DownloadFromPeer(peer netip.AddrPort, infohash, peerID [20]byte, manager chan DownloadCtx) error {
 	conn, err := net.DialTimeout("tcp", peer.String(), 3*time.Second)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer conn.Close()
 
-	// Handshake
-	{
-		var buf [68]byte
-		_, err = conn.Write(MakeHandshake(infohash, peerID).ToByte())
-		if err != nil {
-			return nil, err
-		}
-		len, err := conn.Read(buf[:])
-		if err != nil {
-			return nil, err
-		}
-		handshake := HandshakeFromByte(buf[:len])
-		if handshake.InfoHash != infohash {
-			return nil, fmt.Errorf("HandlePeer(): infohash doesnt match")
-		}
+	if err = handleHandshake(conn, infohash, peerID); err != nil {
+		return err
 	}
 
-	//downloadPieces(conn, )
+	ticker := time.NewTicker(time.Second * 1)
 
-	return nil, nil
+	for {
+		select {
+		case ctx := <-manager: // receive a piece to download
+			bytes, err := downloadChunk(conn, ctx)
+			if err != nil {
+				return err
+			}
+			if sha1.Sum(bytes) != ctx.Sha1sum {
+				return fmt.Errorf("sha1sum for piece #%d doesnt match", ctx.Index)
+			}
+			manager <- DownloadCtx{Index: ctx.Index, Bytes: bytes}
+		case <-ticker.C:
+			conn.Write([]byte{0,0,0,0}) // keep-alive
+		}
+
+	}
+	return nil
+}
+
+// peerMsgLoop communicate with the peer until the piece(s) are fully downloaded
+// or leave if the peer doesnt have or doesnt wanna share the piece(s)
+func downloadChunk(conn net.Conn, ctx DownloadCtx) ([]byte, error) {
+	chocked := true
+	_ = chocked
+	_ = ctx
+	for {
+		msg, err := ReadMessage(conn)
+		if err != nil {
+			return nil, err
+		}
+
+		if msg == nil { // keep-alive
+			continue
+		}
+
+		switch msg.ID {
+		case MsgChoke:
+			slog.Info("received choke", "msg", *msg)
+			chocked = true
+		case MsgUnchoke:
+			slog.Info("received unchoke", "msg", *msg)
+			chocked = false
+		case MsgInterested:
+			slog.Info("received interested", "msg", *msg)
+		case MsgNotInterested:
+			slog.Info("received not interested", "msg", *msg)
+		case MsgHave:
+			slog.Info("received have", "msg", *msg)
+		case MsgBitfield:
+			slog.Info("received bitfield", "msg", *msg)
+		case MsgRequest:
+			slog.Info("received request", "msg", *msg)
+		case MsgPiece:
+			slog.Info("received piece", "msg", *msg)
+		case MsgCancel:
+			slog.Info("received cancel", "msg", *msg)
+		}
+	}
 }
