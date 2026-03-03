@@ -1,8 +1,8 @@
 package bittorrent
 
 import (
-	"fmt"
 	"crypto/sha1"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -12,14 +12,14 @@ import (
 
 // DownloadCtx is used as context when downloading chunk from a client
 type DownloadCtx struct {
-	Index int
-	Bytes []byte
+	Index   int
+	Bytes   []byte
 	Sha1sum [20]byte
 }
 
-func handleHandshake(conn net.Conn, infohash, peerID [20]byte) error {
+func handleHandshake(conn net.Conn, handshake Handshake) error {
 	var buf [68]byte
-	_, err := conn.Write(MakeHandshake(infohash, peerID).ToByte())
+	_, err := conn.Write(handshake.ToByte())
 	if err != nil {
 		return err
 	}
@@ -27,8 +27,7 @@ func handleHandshake(conn net.Conn, infohash, peerID [20]byte) error {
 	if err != nil {
 		return err
 	}
-	handshake := HandshakeFromByte(buf[:len])
-	if handshake.InfoHash != infohash {
+	if HandshakeFromByte(buf[:len]).InfoHash != handshake.InfoHash {
 		return fmt.Errorf("HandlePeer(): infohash doesnt match")
 	}
 	slog.Info("handshake made", "handshake", handshake)
@@ -36,14 +35,14 @@ func handleHandshake(conn net.Conn, infohash, peerID [20]byte) error {
 }
 
 // DownloadFromPeer will try to download a piece from a peer
-func DownloadFromPeer(peer netip.AddrPort, infohash, peerID [20]byte, manager chan DownloadCtx) error {
+func DownloadFromPeer(peer netip.AddrPort, handshake Handshake, manager chan DownloadCtx) error {
 	conn, err := net.DialTimeout("tcp", peer.String(), 3*time.Second)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
 
-	if err = handleHandshake(conn, infohash, peerID); err != nil {
+	if err = handleHandshake(conn, handshake); err != nil {
 		return err
 	}
 
@@ -61,11 +60,10 @@ func DownloadFromPeer(peer netip.AddrPort, infohash, peerID [20]byte, manager ch
 			}
 			manager <- DownloadCtx{Index: ctx.Index, Bytes: bytes}
 		case <-ticker.C:
-			conn.Write([]byte{0,0,0,0}) // keep-alive
+			conn.Write([]byte{0, 0, 0, 0}) // keep-alive
 		}
 
 	}
-	return nil
 }
 
 // peerMsgLoop communicate with the peer until the piece(s) are fully downloaded
