@@ -5,13 +5,13 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"net/netip"
 	"time"
 )
 
 const BlockSize = 16384 // 16 KB is the BitTorrent block size
+const MaxPipeline = 5   // send 5 requests (for 16kb block) at a time
 
 type PieceWork struct {
 	Index  int
@@ -37,7 +37,6 @@ func handleHandshake(conn net.Conn, handshake Handshake) error {
 	if HandshakeFromByte(buf[:len]).InfoHash != handshake.InfoHash {
 		return fmt.Errorf("HandlePeer(): infohash doesnt match")
 	}
-	slog.Info("handshake made", "handshake", handshake)
 	return nil
 }
 
@@ -64,13 +63,12 @@ func PeerWorker(conn net.Conn, workQueue chan PieceWork, resultQueue chan PieceR
 	choked := true
 	peerBitfield := Bitfield{}
 
-	// wait until we know what pieces peer has and they unchoke us
+	// wait until we know what pieces peer has or they unchoke us
 	for choked || peerBitfield == nil {
 		msg, err := ReadMessage(conn)
 		if err != nil {
 			return err
 		}
-		slog.Info("got message from peer", "conn", conn, "msg", msg)
 		// keep-alive
 		if msg == nil {
 			continue
@@ -85,7 +83,6 @@ func PeerWorker(conn net.Conn, workQueue chan PieceWork, resultQueue chan PieceR
 			choked = true
 		}
 	}
-	slog.Info("got unchoked from peer")
 
 	for work := range workQueue {
 		// if peer doesnt have piece, we put it back in the work queue for others
@@ -97,13 +94,11 @@ func PeerWorker(conn net.Conn, workQueue chan PieceWork, resultQueue chan PieceR
 
 		pieceData, err := downloadPiece(conn, work)
 		if err != nil {
-			slog.Error("download failed, returning to queue", "piece", work.Index)
 			workQueue <- work
 			return err
 		}
 
 		if sha1.Sum(pieceData) != [20]byte(work.Hash) {
-			slog.Error("hash mismatch", "piece", work.Index)
 			workQueue <- work
 			continue
 		}
@@ -115,27 +110,29 @@ func PeerWorker(conn net.Conn, workQueue chan PieceWork, resultQueue chan PieceR
 
 func downloadPiece(conn net.Conn, work PieceWork) ([]byte, error) {
 	pieceBuffer := make([]byte, work.Length)
-	downloaded := 0
 
-	for downloaded < work.Length {
-		slog.Info("downloading..", "work", work)
-		// ask for the correct block-size
-		// if the last piece is < 16kb ask for < 16kb
-		currentBlockSize := min(BlockSize, work.Length-downloaded)
+	requested := 0 // Tracks what we have ASKED for
+	pipeline := 0
 
-		// create payload, asking for piece Index
-		// range downloaded:currentBlockSize
-		payload := make([]byte, 12)
-		binary.BigEndian.PutUint32(payload[0:4], uint32(work.Index))
-		binary.BigEndian.PutUint32(payload[4:8], uint32(downloaded))
-		binary.BigEndian.PutUint32(payload[8:12], uint32(currentBlockSize))
+	for requested < work.Length || pipeline > 0 {
 
-		reqMsg := Message{
-			ID:      MsgRequest,
-			Payload: payload,
-		}
-		if err := reqMsg.WriteMessage(conn); err != nil {
-			return nil, err
+		// Fire off requests until we have MaxPipeline pending, or we reach the end of the piece
+		for pipeline < MaxPipeline && requested < work.Length {
+			currentBlockSize := min(BlockSize, work.Length-requested)
+
+			// Idx(4b) + StartOff(4b) + EndOff(4b)
+			payload := make([]byte, 12)
+			binary.BigEndian.PutUint32(payload[0:4], uint32(work.Index))
+			binary.BigEndian.PutUint32(payload[4:8], uint32(requested))
+			binary.BigEndian.PutUint32(payload[8:12], uint32(currentBlockSize))
+
+			reqMsg := Message{ID: MsgRequest, Payload: payload}
+			if err := reqMsg.WriteMessage(conn); err != nil {
+				return nil, err
+			}
+
+			requested += currentBlockSize
+			pipeline++
 		}
 
 		msg, err := ReadMessage(conn)
@@ -143,26 +140,23 @@ func downloadPiece(conn net.Conn, work PieceWork) ([]byte, error) {
 			return nil, err
 		}
 		if msg == nil {
-			continue // Keep-alive
+			continue // keep-alive
 		}
 
 		switch msg.ID {
 		case MsgPiece:
-			// Payload is: Index (4 bytes), Begin Offset (4 bytes), Block Data (remainder)
 			if len(msg.Payload) < 8 {
 				return nil, fmt.Errorf("invalid piece payload")
 			}
 
-			// extract begin offset and data
 			beginOffset := binary.BigEndian.Uint32(msg.Payload[4:8])
 			blockData := msg.Payload[8:]
 
-			// copy and increment our downloaded counter
 			copy(pieceBuffer[beginOffset:], blockData)
-			downloaded += len(blockData)
+			pipeline--
 
 		case MsgChoke:
-			return nil, fmt.Errorf("peer choked us")
+			return nil, fmt.Errorf("peer choked us in the middle of a piece")
 		}
 	}
 

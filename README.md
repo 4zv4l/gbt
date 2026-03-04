@@ -8,9 +8,10 @@ The goal is to build a minimalist, concurrent CLI client that handles the BitTor
 - [X] Parse Bencode `.torrent` files
 - [X] Request tracker for peers
 - [X] Handle TCP Peer Handshakes
-- [ ] Asking tracker for more peers
-- [ ] Handle Chocking/Unchocking state
-- [ ] Download and verify piece hashes
+- [X] Asking tracker for more peers
+- [X] Handle Chocking/Unchocking state
+- [X] Download and verify piece hashes
+- [X] Restart download after a crash or connection issue
 - [ ] Support DHT and magnet link ?
 - [ ] Optimize the whole thing
 

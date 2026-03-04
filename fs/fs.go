@@ -1,16 +1,23 @@
+/*
+module responsible to handle write/read piece to disk
+- writing pieces to disk (handle overlap files)
+- reload pieces from disk (restarting a download)
+*/
 package fs
 
 import (
 	"fmt"
-	"github.com/4zv4l/gbt/bittorrent"
-	"github.com/4zv4l/gbt/torrent"
+	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/4zv4l/gbt/bittorrent"
+	"github.com/4zv4l/gbt/torrent"
 )
 
 type FileEntry struct {
 	File         *os.File
-	GlobalOffset int
+	GlobalOffset int // multiple files are seen as one big file in torrent
 	Length       int
 }
 
@@ -29,7 +36,7 @@ func NewPiecesWriter(torrentFiles []torrent.File, pieceLength int) (*PieceWriter
 		if err := os.MkdirAll(filepath.Dir(f.Path), 0755); err != nil {
 			return nil, fmt.Errorf("couldnt create directory for %s: %w", f.Path, err)
 		}
-		file, err := os.Create(f.Path)
+		file, err := os.OpenFile(f.Path, os.O_RDWR|os.O_CREATE, 0644)
 		if err != nil {
 			return nil, fmt.Errorf("couldnt create file %s: %w", f.Path, err)
 		}
@@ -88,6 +95,35 @@ func (w *PieceWriter) Write(piece bittorrent.PieceResult) error {
 		}
 	}
 	return nil
+}
+
+func (w *PieceWriter) ReadPiece(index int, length int) ([]byte, error) {
+	var (
+		buf              = make([]byte, length)
+		pieceGlobalStart = index * w.pieceLength
+		pieceGlobalEnd   = pieceGlobalStart + length
+	)
+
+	for _, f := range w.files {
+		fileGlobalStart := f.GlobalOffset
+		fileGlobalEnd := f.GlobalOffset + f.Length
+
+		if pieceGlobalStart < fileGlobalEnd && pieceGlobalEnd > fileGlobalStart {
+			overlapStart := max(pieceGlobalStart, fileGlobalStart)
+			overlapEnd := min(pieceGlobalEnd, fileGlobalEnd)
+
+			sliceStart := overlapStart - pieceGlobalStart
+			sliceEnd := overlapEnd - pieceGlobalStart
+			localFileOffset := overlapStart - fileGlobalStart
+
+			_, err := f.File.ReadAt(buf[sliceStart:sliceEnd], int64(localFileOffset))
+			// if EOF, its ok, file not fully downloaded
+			if err != nil && err != io.EOF {
+				return nil, err
+			}
+		}
+	}
+	return buf, nil
 }
 
 func (w *PieceWriter) Close() {
