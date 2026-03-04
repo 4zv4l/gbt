@@ -1,14 +1,16 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha1"
 	"flag"
 	"fmt"
 	"log"
-	"net/netip"
 	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/4zv4l/gbt/bittorrent"
@@ -16,43 +18,44 @@ import (
 	"github.com/4zv4l/gbt/torrent"
 )
 
-// addPeer adds peer to the thread safe peers map and start the peer handling
-func addPeer(reply bittorrent.TrackerReply, peers *sync.Map, handshake bittorrent.Handshake, workQueue chan bittorrent.PieceWork, resultQueue chan bittorrent.PieceResult) {
-	for _, peer := range reply.Peers {
-		if _, exists := peers.Load(peer); exists {
-			continue
-		}
-		peers.Store(peer, true)
-
-		go func(p netip.AddrPort) {
-			conn, err := bittorrent.ConnectAndHandshake(p, handshake)
-			if err != nil {
-				peers.Delete(p)
-				return
-			}
-			go bittorrent.PeerWorker(conn, workQueue, resultQueue)
-		}(peer)
-	}
+func setupGracefulShutdown(cancel context.CancelFunc) {
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		fmt.Fprintf(os.Stderr, "\r\033[K")
+		log.Printf("Ctrl-C pressed, shutting down...")
+		cancel()
+	}()
 }
 
-// trackerLoop will request new peers from tracker and start a goroutine for each new peer to be ready to download
-func trackerLoop(trackerURL string, handshake bittorrent.Handshake, peers *sync.Map, workQueue chan bittorrent.PieceWork, resultQueue chan bittorrent.PieceResult) error {
-	reply, err := bittorrent.GetPeersFromTracker(trackerURL)
-	if err != nil {
-		return err
-	}
-	addPeer(reply, peers, handshake, workQueue, resultQueue)
+// check if part of the file are already on disk
+func verifyAndFillQueue(t *torrent.TorrentFile, s *bittorrent.Swarm, completedPieces map[int]bool) int {
+	downloadedPieces := 0
 
-	ticker := time.NewTicker(time.Duration(reply.Interval) * time.Second)
-
-	for {
-		<-ticker.C
-		reply, err := bittorrent.GetPeersFromTracker(trackerURL)
-		if err != nil {
-			return err
+	for i, hash := range t.Pieces {
+		length := t.PieceLength
+		if i == len(t.Pieces)-1 {
+			if remainder := t.TotalLength % t.PieceLength; remainder != 0 {
+				length = remainder
+			}
 		}
-		addPeer(reply, peers, handshake, workQueue, resultQueue)
+
+		data, err := s.Manager.ReadPiece(i, length)
+		if err == nil && sha1.Sum(data) == hash {
+			completedPieces[i] = true
+			downloadedPieces++
+			s.Bitfield.SetPiece(i)
+		} else {
+			s.WorkQueue <- bittorrent.PieceWork{
+				Index:  i,
+				Hash:   hash[:],
+				Length: length,
+			}
+		}
 	}
+
+	return downloadedPieces
 }
 
 func downloadLoop(t *torrent.TorrentFile, peerID [20]byte, trackerURL string) error {
@@ -62,66 +65,66 @@ func downloadLoop(t *torrent.TorrentFile, peerID [20]byte, trackerURL string) er
 		completedPieces  = map[int]bool{}
 		workQueue        = make(chan bittorrent.PieceWork, totalPieces)
 		resultQueue      = make(chan bittorrent.PieceResult, totalPieces)
-		peers            = sync.Map{}
+		myBitfield       = bittorrent.NewSharedBitfield(totalPieces)
+		ctx, cancel      = context.WithCancel(context.Background())
 	)
+	defer cancel()
+
+	setupGracefulShutdown(cancel)
 
 	// prepare files
-	writer, err := fs.NewPiecesWriter(t.Files, t.PieceLength)
+	pm, err := fs.NewPieceManager(t.Files, t.PieceLength)
 	if err != nil {
 		return err
 	}
-	defer writer.Close()
+	defer pm.Close()
 
-	// fill workQueue will all pieces that needs to be downloaded
-	for i, hash := range t.Pieces {
-		length := t.PieceLength
-
-		// if it's the very last piece, calculate the remainder
-		if i == len(t.Pieces)-1 {
-			remainder := t.TotalLength % t.PieceLength
-			if remainder != 0 {
-				length = remainder
-			}
-		}
-
-		data, err := writer.ReadPiece(i, length)
-		if err == nil && sha1.Sum(data) == hash {
-			completedPieces[i] = true
-			downloadedPieces++
-		} else {
-			workQueue <- bittorrent.PieceWork{
-				Index:  i,
-				Hash:   hash[:],
-				Length: length,
-			}
-		}
+	// setup swamp
+	swarm := &bittorrent.Swarm{
+		Peers:       &sync.Map{},
+		WorkQueue:   workQueue,
+		ResultQueue: resultQueue,
+		Manager:     pm,
+		Handshake:   bittorrent.MakeHandshake(t.InfoHash, peerID),
+		Bitfield:    myBitfield,
 	}
 
+	// check if part of the file are already on disk
+	downloadedPieces = verifyAndFillQueue(t, swarm, completedPieces)
+
 	// start finding peers in the background
-	go trackerLoop(trackerURL, bittorrent.MakeHandshake(t.InfoHash, peerID), &peers, workQueue, resultQueue)
+	go swarm.TrackerLoop(trackerURL)
 
 	// receive and write pieces
 	for downloadedPieces < totalPieces {
-		piece := <-resultQueue
-		if completedPieces[piece.Index] {
-			continue
-		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("interrupted by user (saved %d/%d pieces)", downloadedPieces, totalPieces)
+		case piece := <-resultQueue:
+			if completedPieces[piece.Index] {
+				continue
+			}
 
-		if err := writer.Write(piece); err != nil {
-			return fmt.Errorf("failed to write piece %d: %w", piece.Index, err)
-		}
-		// TODO change Bitfield to have the piece at 1
-		// will allow to seed afterward
+			if err := pm.Write(piece.Index, piece.Data); err != nil {
+				return fmt.Errorf("failed to write piece %d: %w", piece.Index, err)
+			}
 
-		completedPieces[piece.Index] = true
-		downloadedPieces++
-		fmt.Fprintf(os.Stderr, "\rDownloaded %d/%d pieces", downloadedPieces, totalPieces)
+			// update context
+			myBitfield.SetPiece(piece.Index)
+			completedPieces[piece.Index] = true
+			downloadedPieces++
+
+			// update peers
+			swarm.UpdatePeers(piece)
+
+			fmt.Fprintf(os.Stderr, "\rDownloaded %d/%d pieces", downloadedPieces, totalPieces)
+		}
 	}
-
 	return nil
 }
 
 func main() {
+	start := time.Now()
 	filepath := flag.String("file", "", "torrent file to download")
 	flag.IntVar(&bittorrent.MaxPipeline, "pipeline", 5, "pipeline size for peer request")
 
@@ -139,20 +142,30 @@ func main() {
 	if err != nil {
 		log.Fatalf("couldnt parse torrent file: %v", err)
 	}
-	log.Printf("infoHash: %x", t.InfoHash)
 
 	var peerID [20]byte
 	rand.Read(peerID[:])
-	log.Printf("peer ID: %x", peerID)
 
 	trackerURL, err := t.TrackerURL(peerID)
 	if err != nil {
 		log.Fatalf("couldnt generate tracker URL: %v", err)
 	}
 
+	log.Printf("=== Info for %s ===", t.Name)
+	log.Printf("Announce:    %s", t.Announce)
+	log.Printf("InfoHash:    %x", t.InfoHash)
+	log.Printf("PieceLength: %d bytes", t.PieceLength)
+	log.Printf("TotalLength: %d bytes", t.TotalLength)
+	log.Printf("Piece Count: %d", len(t.Pieces))
+	log.Printf("Peer ID:     %x", peerID)
+	log.Printf("Files (%d):", len(t.Files))
+	for i, f := range t.Files {
+		log.Printf("  [%d] %s (%d bytes)", i, f.Path, f.Length)
+	}
+
 	err = downloadLoop(t, peerID, trackerURL)
 	if err != nil {
 		log.Fatalf("failed download: %v", err)
 	}
-	log.Println("\ndownload completed !")
+	log.Printf("Download completed in %v", time.Since(start))
 }

@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/4zv4l/gbt/bittorrent"
 	"github.com/4zv4l/gbt/torrent"
 )
 
@@ -21,12 +20,12 @@ type FileEntry struct {
 	Length       int
 }
 
-type PieceWriter struct {
+type PieceManager struct {
 	files       []FileEntry
 	pieceLength int
 }
 
-func NewPiecesWriter(torrentFiles []torrent.File, pieceLength int) (*PieceWriter, error) {
+func NewPieceManager(torrentFiles []torrent.File, pieceLength int) (*PieceManager, error) {
 	var (
 		entries       = []FileEntry{}
 		currentOffset = 0
@@ -44,7 +43,7 @@ func NewPiecesWriter(torrentFiles []torrent.File, pieceLength int) (*PieceWriter
 		currentOffset += f.Length
 	}
 
-	return &PieceWriter{files: entries, pieceLength: pieceLength}, nil
+	return &PieceManager{files: entries, pieceLength: pieceLength}, nil
 }
 
 /*
@@ -67,13 +66,13 @@ dataToWrite     := piece.Data[20:50]
 localFileOffset := overlapStart (100) - fileGlobalStart (100) 		// Result: 0
 */
 // Write handles the complex math of slicing a piece across multiple file boundaries.
-func (w *PieceWriter) Write(piece bittorrent.PieceResult) error {
+func (pm *PieceManager) Write(index int, data []byte) error {
 	var (
-		pieceGlobalStart = piece.Index * w.pieceLength
-		pieceGlobalEnd   = pieceGlobalStart + len(piece.Data)
+		pieceGlobalStart = index * pm.pieceLength
+		pieceGlobalEnd   = pieceGlobalStart + len(data)
 	)
 
-	for _, f := range w.files {
+	for _, f := range pm.files {
 		fileGlobalStart := f.GlobalOffset
 		fileGlobalEnd := f.GlobalOffset + f.Length
 
@@ -84,7 +83,7 @@ func (w *PieceWriter) Write(piece bittorrent.PieceResult) error {
 
 			sliceStart := overlapStart - pieceGlobalStart
 			sliceEnd := overlapEnd - pieceGlobalStart
-			dataToWrite := piece.Data[sliceStart:sliceEnd]
+			dataToWrite := data[sliceStart:sliceEnd]
 
 			localFileOffset := overlapStart - fileGlobalStart
 
@@ -96,14 +95,14 @@ func (w *PieceWriter) Write(piece bittorrent.PieceResult) error {
 	return nil
 }
 
-func (w *PieceWriter) ReadPiece(index int, length int) ([]byte, error) {
+func (pm *PieceManager) ReadPiece(index int, length int) ([]byte, error) {
 	var (
 		buf              = make([]byte, length)
-		pieceGlobalStart = index * w.pieceLength
+		pieceGlobalStart = index * pm.pieceLength
 		pieceGlobalEnd   = pieceGlobalStart + length
 	)
 
-	for _, f := range w.files {
+	for _, f := range pm.files {
 		fileGlobalStart := f.GlobalOffset
 		fileGlobalEnd := f.GlobalOffset + f.Length
 
@@ -125,8 +124,45 @@ func (w *PieceWriter) ReadPiece(index int, length int) ([]byte, error) {
 	return buf, nil
 }
 
-func (w *PieceWriter) Close() {
-	for _, entry := range w.files {
+// for seeding
+func (pm *PieceManager) ReadBlock(index int, begin int, length int) ([]byte, error) {
+	var (
+		buf              = make([]byte, length)
+		blockGlobalStart = (index * pm.pieceLength) + begin
+		blockGlobalEnd   = blockGlobalStart + length
+		bytesRead        = 0
+	)
+
+	// find the overlapping files
+	for _, f := range pm.files {
+		fileGlobalStart := f.GlobalOffset
+		fileGlobalEnd := f.GlobalOffset + f.Length
+
+		if blockGlobalStart < fileGlobalEnd && blockGlobalEnd > fileGlobalStart {
+			overlapStart := max(blockGlobalStart, fileGlobalStart)
+			overlapEnd := min(blockGlobalEnd, fileGlobalEnd)
+
+			sliceStart := overlapStart - blockGlobalStart
+			sliceEnd := overlapEnd - blockGlobalStart
+			localFileOffset := overlapStart - fileGlobalStart
+
+			n, err := f.File.ReadAt(buf[sliceStart:sliceEnd], int64(localFileOffset))
+			if err != nil && err != io.EOF {
+				return nil, err
+			}
+			bytesRead += n
+		}
+	}
+
+	if bytesRead < length {
+		return nil, fmt.Errorf("could not read the full block from disk")
+	}
+
+	return buf, nil
+}
+
+func (pm *PieceManager) Close() {
+	for _, entry := range pm.files {
 		entry.File.Close()
 	}
 }
