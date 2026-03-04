@@ -4,12 +4,13 @@ import (
 	"crypto/sha1"
 	"encoding/binary"
 	"fmt"
-	"github.com/4zv4l/gbt/fs"
 	"net"
 	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/4zv4l/gbt/fs"
 )
 
 type Swarm struct {
@@ -22,8 +23,8 @@ type Swarm struct {
 	SeededCounter *atomic.Uint64
 }
 
-// addPeer adds peer to the thread safe peers map and start the peer handling
-func (s *Swarm) addPeer(reply TrackerReply) {
+// AddPeer adds peer to the thread safe peers map and start the peer handling
+func (s *Swarm) AddPeer(reply TrackerReply) {
 	for _, peer := range reply.Peers {
 		if _, exists := s.Peers.Load(peer); exists {
 			continue
@@ -48,7 +49,7 @@ func (s *Swarm) TrackerLoop(trackerURL string) error {
 	if err != nil {
 		return err
 	}
-	s.addPeer(reply)
+	s.AddPeer(reply)
 
 	ticker := time.NewTicker(time.Duration(reply.Interval) * time.Second)
 
@@ -58,7 +59,7 @@ func (s *Swarm) TrackerLoop(trackerURL string) error {
 		if err != nil {
 			return err
 		}
-		s.addPeer(reply)
+		s.AddPeer(reply)
 	}
 }
 
@@ -81,7 +82,9 @@ func (s *Swarm) PeerWorker(conn net.Conn) error {
 		ID:      MsgBitfield,
 		Payload: s.Bitfield.ToByte(),
 	}
-	bitfieldMsg.WriteMessage(conn)
+	if err := bitfieldMsg.WriteMessage(conn); err != nil {
+		return err
+	}
 
 	interestedMsg := Message{ID: MsgInterested}
 	if err := interestedMsg.WriteMessage(conn); err != nil {
@@ -109,6 +112,56 @@ func (s *Swarm) PeerWorker(conn net.Conn) error {
 			choked = false
 		case MsgChoke:
 			choked = true
+		case MsgInterested:
+			unchokeMsg := Message{ID: MsgUnchoke}
+			if err := unchokeMsg.WriteMessage(conn); err != nil {
+				return err
+			}
+		case MsgNotInterested:
+			return fmt.Errorf("peer %v is not interested", conn.RemoteAddr())
+		}
+	}
+
+	// if Queue is empty, start seeding only
+	if len(s.WorkQueue) == 0 {
+		for {
+			msg, err := ReadMessage(conn)
+			if err != nil {
+				return err
+			}
+			if msg == nil {
+				continue
+			}
+
+			switch msg.ID {
+			case MsgInterested:
+				unchokeMsg := Message{ID: MsgUnchoke}
+				unchokeMsg.WriteMessage(conn)
+
+			case MsgRequest:
+				if len(msg.Payload) != 12 {
+					continue
+				}
+
+				index := binary.BigEndian.Uint32(msg.Payload[0:4])
+				begin := binary.BigEndian.Uint32(msg.Payload[4:8])
+				length := binary.BigEndian.Uint32(msg.Payload[8:12])
+
+				blockData, err := s.Manager.ReadBlock(int(index), int(begin), int(length))
+				if err != nil {
+					continue // ignore if failed to read
+				}
+
+				replyPayload := make([]byte, 8+len(blockData))
+				binary.BigEndian.PutUint32(replyPayload[0:4], index)
+				binary.BigEndian.PutUint32(replyPayload[4:8], begin)
+				copy(replyPayload[8:], blockData)
+
+				replyMsg := Message{ID: MsgPiece, Payload: replyPayload}
+				replyMsg.WriteMessage(conn)
+				s.SeededCounter.Add(1)
+
+			}
 		}
 	}
 

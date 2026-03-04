@@ -7,8 +7,10 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/netip"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -59,7 +61,7 @@ func verifyAndFillQueue(t *torrent.TorrentFile, s *bittorrent.Swarm, completedPi
 	return downloadedPieces
 }
 
-func downloadLoop(t *torrent.TorrentFile, peerID [20]byte, trackerURL string, port int) error {
+func downloadLoop(t *torrent.TorrentFile, peerID [20]byte, trackerURL string, port int, seed bool, directPeers []netip.AddrPort) error {
 	var (
 		totalPieces      = len(t.Pieces)
 		downloadedPieces = 0
@@ -99,6 +101,12 @@ func downloadLoop(t *torrent.TorrentFile, peerID [20]byte, trackerURL string, po
 	if port > 0 {
 		go swarm.StartActiveSeeding(port)
 	}
+
+	// can add local peer
+	if len(directPeers) > 0 {
+		mockReply := bittorrent.TrackerReply{Peers: directPeers}
+		swarm.AddPeer(mockReply)
+	}
 	// start finding peers in the background
 	go swarm.TrackerLoop(trackerURL)
 
@@ -125,17 +133,52 @@ func downloadLoop(t *torrent.TorrentFile, peerID [20]byte, trackerURL string, po
 			swarm.UpdatePeers(piece)
 
 			seeded := seededBlocks.Load()
-			seededStr := fmt.Sprintf("%d", seeded)
-			fmt.Fprintf(os.Stderr, "\rDownloaded: %d/%d pieces | Seeded: %s blocks", downloadedPieces, totalPieces, seededStr)
+			fmt.Fprintf(os.Stderr, "\rDownloaded: %d/%d pieces | Seeded: %d blocks", downloadedPieces, totalPieces, seeded)
 		}
 	}
+
+	if seed {
+		log.Printf("Download 100%% complete, seeding...")
+
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-ticker.C:
+				seeded := seededBlocks.Load()
+				fmt.Fprintf(os.Stderr, "\rDownloaded: %d/%d pieces | Seeded: %d blocks", downloadedPieces, totalPieces, seeded)
+			}
+		}
+	}
+
 	return nil
+}
+
+func parsePeers(strPeers string) ([]netip.AddrPort, error) {
+	var peers []netip.AddrPort
+	if strPeers == "" {
+		return []netip.AddrPort{}, nil
+	}
+
+	for _, strPeer := range strings.Split(strPeers, ",") {
+		peer, err := netip.ParseAddrPort(strPeer)
+		if err != nil {
+			return nil, err
+		}
+		peers = append(peers, peer)
+	}
+	return peers, nil
 }
 
 func main() {
 	start := time.Now()
 	filepath := flag.String("file", "", "torrent file to download")
 	port := flag.Int("port", -1, "port to listen for peers (<=0 to not listen)")
+	seed := flag.Bool("seed", false, "keep running and seeding after download completes")
+	directPeers := flag.String("peer", "", "IP:Port of a direct peers (separated by ',') to connect to")
 	flag.IntVar(&bittorrent.MaxPipeline, "pipeline", 5, "pipeline size for peer request")
 
 	flag.Parse()
@@ -173,9 +216,15 @@ func main() {
 		log.Printf("  [%d] %s (%d bytes)", i, f.Path, f.Length)
 	}
 
-	err = downloadLoop(t, peerID, trackerURL, *port)
+	peers, err := parsePeers(*directPeers)
+	if err != nil {
+		log.Fatalf("failed to parse peers: %v", err)
+	}
+
+	err = downloadLoop(t, peerID, trackerURL, *port, *seed, peers)
 	if err != nil {
 		log.Fatalf("failed download: %v", err)
 	}
+	fmt.Println()
 	log.Printf("Download completed in %v", time.Since(start))
 }
