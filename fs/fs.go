@@ -52,14 +52,13 @@ func NewPiecesWriter(torrentFiles []torrent.File, pieceLength int) (*PieceWriter
 // GLOBAL SPACE (Bytes)
 // 0                  80       100      130                 200
 // |===================|========|========|===================|
-// [              FILE A        ][              FILE B       ]
+// [           FILE A           ][              FILE B       ]
+//	                   [       PIECE     ]
 //
-//	[       PIECE     ]
-//
-//	OVERLAP 1 (File A)
-//	[========]
-//	         OVERLAP 2 (File B)
-//	         [========]
+//	          OVERLAP 1 (File A)
+//	                   [========]
+//	                               OVERLAP 2 (File B)
+//	                            [========]
 //
 // ```
 // overlapStart    := max(pieceGlobalStart (80), fileGlobalStart (100)) // Result: 100
