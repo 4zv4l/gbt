@@ -15,6 +15,25 @@ import (
 	"github.com/4zv4l/gbt/torrent"
 )
 
+func addPeer(reply bittorrent.TrackerReply, peers *sync.Map, handshake bittorrent.Handshake, workQueue chan bittorrent.PieceWork, resultQueue chan bittorrent.PieceResult) {
+	for _, peer := range reply.Peers {
+		if _, exists := peers.Load(peer); exists {
+			continue
+		}
+		peers.Store(peer, true)
+
+		go func(p netip.AddrPort) {
+			conn, err := bittorrent.ConnectAndHandshake(p, handshake)
+			if err != nil {
+				peers.Delete(p)
+				return
+			}
+			slog.Info("successful handshake", "conn", conn.RemoteAddr())
+			go bittorrent.PeerWorker(conn, workQueue, resultQueue)
+		}(peer)
+	}
+}
+
 // trackerLoop will request new peers from tracker and start a goroutine for the new
 // peers to listen for new pieces to download
 func trackerLoop(trackerURL string, handshake bittorrent.Handshake, peers *sync.Map, workQueue chan bittorrent.PieceWork, resultQueue chan bittorrent.PieceResult) error {
@@ -22,6 +41,9 @@ func trackerLoop(trackerURL string, handshake bittorrent.Handshake, peers *sync.
 	if err != nil {
 		return err
 	}
+	slog.Info("got peers from tracker", "peers", reply.Peers)
+	addPeer(reply, peers, handshake, workQueue, resultQueue)
+	slog.Info("filled peers map")
 
 	ticker := time.NewTicker(time.Duration(reply.Interval) * time.Second)
 
@@ -31,22 +53,9 @@ func trackerLoop(trackerURL string, handshake bittorrent.Handshake, peers *sync.
 		if err != nil {
 			return err
 		}
-
-		for _, peer := range reply.Peers {
-			if _, exists := peers.Load(peer); exists {
-				continue
-			}
-			peers.Store(peer, true)
-
-			go func(p netip.AddrPort) {
-				conn, err := bittorrent.ConnectAndHandshake(p, handshake)
-				if err != nil {
-					peers.Delete(p)
-					return
-				}
-				go bittorrent.PeerWorker(conn, workQueue, resultQueue)
-			}(peer)
-		}
+		slog.Info("got peers from tracker", "peers", reply.Peers)
+		addPeer(reply, peers, handshake, workQueue, resultQueue)
+		slog.Info("filled peers map")
 	}
 }
 
@@ -77,6 +86,7 @@ func downloadLoop(t *torrent.TorrentFile, peerID [20]byte, trackerURL string) er
 			Length: length,
 		}
 	}
+	slog.Info("filled workQueue")
 
 	// start finding peers in the background
 	go trackerLoop(trackerURL, bittorrent.MakeHandshake(t.InfoHash, peerID), &peers, workQueue, resultQueue)
@@ -91,6 +101,7 @@ func downloadLoop(t *torrent.TorrentFile, peerID [20]byte, trackerURL string) er
 	// receive and write pieces
 	for downloadedPieces < totalPieces {
 		piece := <-resultQueue
+		slog.Info("got a piece from a worker", "piece", piece)
 		if completedPieces[piece.Index] {
 			continue
 		}
@@ -98,6 +109,7 @@ func downloadLoop(t *torrent.TorrentFile, peerID [20]byte, trackerURL string) er
 		if err := writer.Write(piece); err != nil {
 			return fmt.Errorf("failed to write piece %d: %w", piece.Index, err)
 		}
+		// TODO change Bitfield to have the piece at 1
 
 		completedPieces[piece.Index] = true
 		downloadedPieces++

@@ -46,7 +46,6 @@ func ConnectAndHandshake(peer netip.AddrPort, handshake Handshake) (net.Conn, er
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
 
 	if err = handleHandshake(conn, handshake); err != nil {
 		return nil, err
@@ -71,6 +70,7 @@ func PeerWorker(conn net.Conn, workQueue chan PieceWork, resultQueue chan PieceR
 		if err != nil {
 			return err
 		}
+		slog.Info("got message from peer", "conn", conn, "msg", msg)
 		// keep-alive
 		if msg == nil {
 			continue
@@ -85,6 +85,7 @@ func PeerWorker(conn net.Conn, workQueue chan PieceWork, resultQueue chan PieceR
 			choked = true
 		}
 	}
+	slog.Info("got unchoked from peer")
 
 	for work := range workQueue {
 		// if peer doesnt have piece, we put it back in the work queue for others
@@ -117,6 +118,7 @@ func downloadPiece(conn net.Conn, work PieceWork) ([]byte, error) {
 	downloaded := 0
 
 	for downloaded < work.Length {
+		slog.Info("downloading..", "work", work)
 		// ask for the correct block-size
 		// if the last piece is < 16kb ask for < 16kb
 		currentBlockSize := min(BlockSize, work.Length-downloaded)
