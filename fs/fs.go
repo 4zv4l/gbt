@@ -47,26 +47,26 @@ func NewPiecesWriter(torrentFiles []torrent.File, pieceLength int) (*PieceWriter
 	return &PieceWriter{files: entries, pieceLength: pieceLength}, nil
 }
 
+/*
+GLOBAL SPACE (Bytes)
+0                  80       100      130                 200
+|===================|========|========|===================|
+[              FILE A        ][              FILE B       ]
+                    [       PIECE     ]
+
+                    OVERLAP 1 (File A)
+                    [========]
+                             OVERLAP 2 (File B)
+                             [========]
+
+overlapStart    := max(pieceGlobalStart (80), fileGlobalStart (100)) // Result: 100
+overlapEnd      := min(pieceGlobalEnd (130), fileGlobalEnd (200))    // Result: 130
+sliceStart      := overlapStart (100) - pieceGlobalStart (80) 		// Result: 20
+sliceEnd        := overlapEnd (130)   - pieceGlobalStart (80) 		// Result: 50
+dataToWrite     := piece.Data[20:50]
+localFileOffset := overlapStart (100) - fileGlobalStart (100) 		// Result: 0
+*/
 // Write handles the complex math of slicing a piece across multiple file boundaries.
-// ```
-// GLOBAL SPACE (Bytes)
-// 0                  80       100      130                 200
-// |===================|========|========|===================|
-// [           FILE A           ][              FILE B       ]
-//	                   [       PIECE     ]
-//
-//	          OVERLAP 1 (File A)
-//	                   [========]
-//	                               OVERLAP 2 (File B)
-//	                            [========]
-//
-// ```
-// overlapStart    := max(pieceGlobalStart (80), fileGlobalStart (100)) // Result: 100
-// overlapEnd      := min(pieceGlobalEnd (130), fileGlobalEnd (200))    // Result: 130
-// sliceStart      := overlapStart (100) - pieceGlobalStart (80) 		// Result: 20
-// sliceEnd        := overlapEnd (130)   - pieceGlobalStart (80) 		// Result: 50
-// dataToWrite     := piece.Data[20:50]
-// localFileOffset := overlapStart (100) - fileGlobalStart (100) 		// Result: 0
 func (w *PieceWriter) Write(piece bittorrent.PieceResult) error {
 	var (
 		pieceGlobalStart = piece.Index * w.pieceLength

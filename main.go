@@ -122,9 +122,8 @@ func downloadLoop(t *torrent.TorrentFile, peerID [20]byte, trackerURL string) er
 }
 
 func main() {
-	var (
-		filepath = flag.String("file", "", "torrent file to download")
-	)
+	filepath := flag.String("file", "", "torrent file to download")
+	flag.IntVar(&bittorrent.MaxPipeline, "pipeline", 5, "pipeline size for peer request")
 
 	flag.Parse()
 	if *filepath == "" {
@@ -155,5 +154,5 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed download: %v", err)
 	}
-	log.Println("download completed !")
+	log.Println("\ndownload completed !")
 }
