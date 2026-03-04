@@ -1,5 +1,7 @@
 package bittorrent
 
+import "io"
+
 type Handshake struct {
 	Length   uint8  // value should always be 19
 	Pstr     string // "BitTorrent protocol" (19 char long)
@@ -16,6 +18,15 @@ func (h Handshake) ToByte() []byte {
 	buf = append(buf, h.InfoHash[:]...)
 	buf = append(buf, h.PeerID[:]...)
 	return buf
+}
+
+func ReadHandshake(r io.Reader) (Handshake, error) {
+	buff := [68]byte{}
+	_, err := io.ReadFull(r, buff[:])
+	if err != nil {
+		return Handshake{}, err
+	}
+	return HandshakeFromByte(buff[:]), nil
 }
 
 func HandshakeFromByte(rawHandshake []byte) Handshake {

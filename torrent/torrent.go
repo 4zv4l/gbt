@@ -114,15 +114,18 @@ func Parse(data []byte) (*TorrentFile, error) {
 }
 
 // generate the url to send to the track to get peers
-func (t *TorrentFile) TrackerURL(peerID [20]byte) (string, error) {
+func (t *TorrentFile) TrackerURL(peerID [20]byte, port int) (string, error) {
 	uri, err := url.Parse(t.Announce)
 	if err != nil {
 		return "", err
 	}
+	if port <= 0 {
+		port = 0
+	}
 	uri.RawQuery = url.Values{
 		"info_hash":  []string{string(t.InfoHash[:])},
 		"peer_id":    []string{string(peerID[:])},
-		"port":       []string{uri.Port()},
+		"port":       []string{strconv.Itoa(port)},
 		"uploaded":   []string{"0"},
 		"downloaded": []string{"0"},
 		"compact":    []string{"1"},

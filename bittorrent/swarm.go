@@ -8,16 +8,18 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 type Swarm struct {
-	Peers       *sync.Map
-	WorkQueue   chan PieceWork
-	ResultQueue chan PieceResult
-	Manager     *fs.PieceManager
-	Bitfield    *SharedBitfield
-	Handshake   Handshake
+	Peers         *sync.Map
+	WorkQueue     chan PieceWork
+	ResultQueue   chan PieceResult
+	Manager       *fs.PieceManager
+	Bitfield      *SharedBitfield
+	Handshake     Handshake
+	SeededCounter *atomic.Uint64
 }
 
 // addPeer adds peer to the thread safe peers map and start the peer handling
@@ -118,7 +120,7 @@ func (s *Swarm) PeerWorker(conn net.Conn) error {
 			continue
 		}
 
-		pieceData, err := downloadPiece(conn, work, s.Manager)
+		pieceData, err := s.downloadPiece(conn, work)
 		if err != nil {
 			s.WorkQueue <- work
 			return err
@@ -134,7 +136,7 @@ func (s *Swarm) PeerWorker(conn net.Conn) error {
 	return nil
 }
 
-func downloadPiece(conn net.Conn, work PieceWork, pm *fs.PieceManager) ([]byte, error) {
+func (s *Swarm) downloadPiece(conn net.Conn, work PieceWork) ([]byte, error) {
 	pieceBuffer := make([]byte, work.Length)
 
 	requested := 0 // Tracks what we have asked
@@ -192,7 +194,7 @@ func downloadPiece(conn net.Conn, work PieceWork, pm *fs.PieceManager) ([]byte, 
 			begin := binary.BigEndian.Uint32(msg.Payload[4:8])
 			length := binary.BigEndian.Uint32(msg.Payload[8:12])
 
-			blockData, err := pm.ReadBlock(int(index), int(begin), int(length))
+			blockData, err := s.Manager.ReadBlock(int(index), int(begin), int(length))
 			if err != nil {
 				continue // ignore if failed to read
 			}
@@ -204,10 +206,46 @@ func downloadPiece(conn net.Conn, work PieceWork, pm *fs.PieceManager) ([]byte, 
 
 			replyMsg := Message{ID: MsgPiece, Payload: replyPayload}
 			replyMsg.WriteMessage(conn)
+			s.SeededCounter.Add(1)
 		case MsgChoke:
 			return nil, fmt.Errorf("peer choked us in the middle of a piece")
 		}
 	}
 
 	return pieceBuffer, nil
+}
+
+func (s *Swarm) StartActiveSeeding(port int) error {
+	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return fmt.Errorf("failed to start seeder port: %w", err)
+	}
+	defer listener.Close()
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			continue
+		}
+
+		go func(c net.Conn) {
+			defer c.Close()
+
+			theirHandshake, err := ReadHandshake(c)
+			if err != nil {
+				return
+			}
+
+			// if they dont ask for the same torrent as us
+			if theirHandshake.InfoHash != s.Handshake.InfoHash {
+				return
+			}
+
+			if _, err := c.Write(s.Handshake.ToByte()); err != nil {
+				return
+			}
+
+			s.PeerWorker(c)
+		}(conn)
+	}
 }

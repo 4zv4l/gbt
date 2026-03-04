@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -58,11 +59,12 @@ func verifyAndFillQueue(t *torrent.TorrentFile, s *bittorrent.Swarm, completedPi
 	return downloadedPieces
 }
 
-func downloadLoop(t *torrent.TorrentFile, peerID [20]byte, trackerURL string) error {
+func downloadLoop(t *torrent.TorrentFile, peerID [20]byte, trackerURL string, port int) error {
 	var (
 		totalPieces      = len(t.Pieces)
 		downloadedPieces = 0
 		completedPieces  = map[int]bool{}
+		seededBlocks     atomic.Uint64
 		workQueue        = make(chan bittorrent.PieceWork, totalPieces)
 		resultQueue      = make(chan bittorrent.PieceResult, totalPieces)
 		myBitfield       = bittorrent.NewSharedBitfield(totalPieces)
@@ -81,17 +83,22 @@ func downloadLoop(t *torrent.TorrentFile, peerID [20]byte, trackerURL string) er
 
 	// setup swamp
 	swarm := &bittorrent.Swarm{
-		Peers:       &sync.Map{},
-		WorkQueue:   workQueue,
-		ResultQueue: resultQueue,
-		Manager:     pm,
-		Handshake:   bittorrent.MakeHandshake(t.InfoHash, peerID),
-		Bitfield:    myBitfield,
+		Peers:         &sync.Map{},
+		WorkQueue:     workQueue,
+		ResultQueue:   resultQueue,
+		Manager:       pm,
+		Handshake:     bittorrent.MakeHandshake(t.InfoHash, peerID),
+		Bitfield:      myBitfield,
+		SeededCounter: &seededBlocks,
 	}
 
 	// check if part of the file are already on disk
 	downloadedPieces = verifyAndFillQueue(t, swarm, completedPieces)
 
+	// start actively listening
+	if port > 0 {
+		go swarm.StartActiveSeeding(port)
+	}
 	// start finding peers in the background
 	go swarm.TrackerLoop(trackerURL)
 
@@ -117,7 +124,9 @@ func downloadLoop(t *torrent.TorrentFile, peerID [20]byte, trackerURL string) er
 			// update peers
 			swarm.UpdatePeers(piece)
 
-			fmt.Fprintf(os.Stderr, "\rDownloaded %d/%d pieces", downloadedPieces, totalPieces)
+			seeded := seededBlocks.Load()
+			seededStr := fmt.Sprintf("%d", seeded)
+			fmt.Fprintf(os.Stderr, "\rDownloaded: %d/%d pieces | Seeded: %s blocks", downloadedPieces, totalPieces, seededStr)
 		}
 	}
 	return nil
@@ -126,6 +135,7 @@ func downloadLoop(t *torrent.TorrentFile, peerID [20]byte, trackerURL string) er
 func main() {
 	start := time.Now()
 	filepath := flag.String("file", "", "torrent file to download")
+	port := flag.Int("port", -1, "port to listen for peers (<=0 to not listen)")
 	flag.IntVar(&bittorrent.MaxPipeline, "pipeline", 5, "pipeline size for peer request")
 
 	flag.Parse()
@@ -146,7 +156,7 @@ func main() {
 	var peerID [20]byte
 	rand.Read(peerID[:])
 
-	trackerURL, err := t.TrackerURL(peerID)
+	trackerURL, err := t.TrackerURL(peerID, *port)
 	if err != nil {
 		log.Fatalf("couldnt generate tracker URL: %v", err)
 	}
@@ -163,7 +173,7 @@ func main() {
 		log.Printf("  [%d] %s (%d bytes)", i, f.Path, f.Length)
 	}
 
-	err = downloadLoop(t, peerID, trackerURL)
+	err = downloadLoop(t, peerID, trackerURL, *port)
 	if err != nil {
 		log.Fatalf("failed download: %v", err)
 	}

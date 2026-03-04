@@ -2,7 +2,6 @@ package bittorrent
 
 import (
 	"fmt"
-	"io"
 	"net"
 	"net/netip"
 	"time"
@@ -23,16 +22,15 @@ type PieceResult struct {
 }
 
 func handleHandshake(conn net.Conn, handshake Handshake) error {
-	var buf [68]byte
 	_, err := conn.Write(handshake.ToByte())
 	if err != nil {
 		return err
 	}
-	len, err := io.ReadFull(conn, buf[:])
+	peerHandshake, err := ReadHandshake(conn)
 	if err != nil {
 		return err
 	}
-	if HandshakeFromByte(buf[:len]).InfoHash != handshake.InfoHash {
+	if peerHandshake.InfoHash != handshake.InfoHash {
 		return fmt.Errorf("HandlePeer(): infohash doesnt match")
 	}
 	return nil
