@@ -3,7 +3,6 @@ package torrent
 import (
 	"os"
 	"reflect"
-	"strings"
 	"testing"
 )
 
@@ -20,13 +19,13 @@ func TestParseDebianSingleFile(t *testing.T) {
 
 	t.Logf("=== Parsed Torrent: %s ===", tf.Name)
 	t.Logf("Announce:    %s", tf.Announce)
-	t.Logf("InfoHash:    %x", tf.InfoHash) // %x automatically converts bytes to Hex!
+	t.Logf("InfoHash:    %x", tf.InfoHash)
 	t.Logf("PieceLength: %d bytes", tf.PieceLength)
 	t.Logf("TotalLength: %d bytes", tf.TotalLength)
 	t.Logf("Piece Count: %d", len(tf.Pieces))
 	t.Logf("Files (%d):", len(tf.Files))
 	for i, f := range tf.Files {
-		t.Logf("  [%d] %s (%d bytes)", i, strings.Join(f.Path, "/"), f.Length)
+		t.Logf("  [%d] %s (%d bytes)", i, f.Path, f.Length)
 	}
 	t.Logf("=================================")
 
@@ -79,7 +78,7 @@ func TestParseTmpMultiFile(t *testing.T) {
 	t.Logf("Piece Count: %d", len(tf.Pieces))
 	t.Logf("Files (%d):", len(tf.Files))
 	for i, f := range tf.Files {
-		t.Logf("  [%d] %s (%d bytes)", i, strings.Join(f.Path, "/"), f.Length)
+		t.Logf("  [%d] %s (%d bytes)", i, f.Path, f.Length)
 	}
 	t.Logf("=================================")
 
@@ -105,7 +104,7 @@ func TestParseTmpMultiFile(t *testing.T) {
 	if tf.Files[0].Length != 0 {
 		t.Errorf("Expected file 0 length to be 0, got %d", tf.Files[0].Length)
 	}
-	if expectedPath := []string{"foobar"}; !reflect.DeepEqual(tf.Files[0].Path, expectedPath) {
+	if expectedPath := "foobar"; !reflect.DeepEqual(tf.Files[0].Path, expectedPath) {
 		t.Errorf("Expected file 0 path %v, got %v", expectedPath, tf.Files[0].Path)
 	}
 
@@ -113,7 +112,7 @@ func TestParseTmpMultiFile(t *testing.T) {
 	if tf.Files[1].Length != 192 {
 		t.Errorf("Expected file 1 length to be 192, got %d", tf.Files[1].Length)
 	}
-	if expectedPath := []string{"test-libre-office.md"}; !reflect.DeepEqual(tf.Files[1].Path, expectedPath) {
+	if expectedPath := "test-libre-office.md"; !reflect.DeepEqual(tf.Files[1].Path, expectedPath) {
 		t.Errorf("Expected file 1 path %v, got %v", expectedPath, tf.Files[1].Path)
 	}
 

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"path/filepath"
 	"strconv"
 
 	"github.com/4zv4l/gbt/bencode"
@@ -17,7 +18,7 @@ import (
 // File represents a single file inside the torrent.
 type File struct {
 	Length int
-	Path   []string
+	Path   string
 }
 
 type TorrentFile struct {
@@ -79,9 +80,9 @@ func Parse(data []byte) (*TorrentFile, error) {
 			fDict := f.(map[string]any)
 			length, _ := fDict["length"].(int)
 
-			var path []string
+			var path string
 			for _, p := range fDict["path"].([]any) {
-				path = append(path, p.(string))
+				path = filepath.Join(path, p.(string))
 			}
 
 			files = append(files, File{Length: length, Path: path})
@@ -92,7 +93,7 @@ func Parse(data []byte) (*TorrentFile, error) {
 		if !ok {
 			return nil, errors.New("invalid torrent: no length or files list")
 		}
-		files = append(files, File{Length: length, Path: []string{name}})
+		files = append(files, File{Length: length, Path: name})
 		totalLength = length
 	}
 

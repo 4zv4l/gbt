@@ -2,6 +2,7 @@ package bittorrent
 
 import (
 	"crypto/sha1"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"log/slog"
@@ -10,11 +11,17 @@ import (
 	"time"
 )
 
-// DownloadCtx is used as context when downloading chunk from a client
-type DownloadCtx struct {
-	Index   int
-	Bytes   []byte
-	Sha1sum [20]byte
+const BlockSize = 16384 // 16 KB is the BitTorrent block size
+
+type PieceWork struct {
+	Index  int
+	Hash   []byte
+	Length int
+}
+
+type PieceResult struct {
+	Index int
+	Data  []byte
 }
 
 func handleHandshake(conn net.Conn, handshake Handshake) error {
@@ -34,75 +41,128 @@ func handleHandshake(conn net.Conn, handshake Handshake) error {
 	return nil
 }
 
-// DownloadFromPeer will try to download a piece from a peer
-func DownloadFromPeer(peer netip.AddrPort, handshake Handshake, manager chan DownloadCtx) error {
+func ConnectAndHandshake(peer netip.AddrPort, handshake Handshake) (net.Conn, error) {
 	conn, err := net.DialTimeout("tcp", peer.String(), 3*time.Second)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer conn.Close()
 
 	if err = handleHandshake(conn, handshake); err != nil {
+		return nil, err
+	}
+	return conn, nil
+}
+
+func PeerWorker(conn net.Conn, workQueue chan PieceWork, resultQueue chan PieceResult) error {
+	defer conn.Close()
+
+	interestedMsg := Message{ID: MsgInterested}
+	if err := interestedMsg.WriteMessage(conn); err != nil {
 		return err
 	}
 
-	ticker := time.NewTicker(time.Second * 1)
+	choked := true
+	peerBitfield := Bitfield{}
 
-	for {
-		select {
-		case ctx := <-manager: // receive a piece to download
-			bytes, err := downloadChunk(conn, ctx)
-			if err != nil {
-				return err
-			}
-			if sha1.Sum(bytes) != ctx.Sha1sum {
-				return fmt.Errorf("sha1sum for piece #%d doesnt match", ctx.Index)
-			}
-			manager <- DownloadCtx{Index: ctx.Index, Bytes: bytes}
-		case <-ticker.C:
-			conn.Write([]byte{0, 0, 0, 0}) // keep-alive
-		}
-
-	}
-}
-
-// peerMsgLoop communicate with the peer until the piece(s) are fully downloaded
-// or leave if the peer doesnt have or doesnt wanna share the piece(s)
-func downloadChunk(conn net.Conn, ctx DownloadCtx) ([]byte, error) {
-	chocked := true
-	_ = chocked
-	_ = ctx
-	for {
+	// wait until we know what pieces peer has and they unchoke us
+	for choked || peerBitfield == nil {
 		msg, err := ReadMessage(conn)
 		if err != nil {
-			return nil, err
+			return err
 		}
-
-		if msg == nil { // keep-alive
+		// keep-alive
+		if msg == nil {
 			continue
 		}
 
 		switch msg.ID {
-		case MsgChoke:
-			slog.Info("received choke", "msg", *msg)
-			chocked = true
-		case MsgUnchoke:
-			slog.Info("received unchoke", "msg", *msg)
-			chocked = false
-		case MsgInterested:
-			slog.Info("received interested", "msg", *msg)
-		case MsgNotInterested:
-			slog.Info("received not interested", "msg", *msg)
-		case MsgHave:
-			slog.Info("received have", "msg", *msg)
 		case MsgBitfield:
-			slog.Info("received bitfield", "msg", *msg)
-		case MsgRequest:
-			slog.Info("received request", "msg", *msg)
-		case MsgPiece:
-			slog.Info("received piece", "msg", *msg)
-		case MsgCancel:
-			slog.Info("received cancel", "msg", *msg)
+			peerBitfield = msg.Payload
+		case MsgUnchoke:
+			choked = false
+		case MsgChoke:
+			choked = true
 		}
 	}
+
+	for work := range workQueue {
+		// if peer doesnt have piece, we put it back in the work queue for others
+		if !peerBitfield.HasPiece(work.Index) {
+			workQueue <- work
+			time.Sleep(50 * time.Millisecond)
+			continue
+		}
+
+		pieceData, err := downloadPiece(conn, work)
+		if err != nil {
+			slog.Error("download failed, returning to queue", "piece", work.Index)
+			workQueue <- work
+			return err
+		}
+
+		if sha1.Sum(pieceData) != [20]byte(work.Hash) {
+			slog.Error("hash mismatch", "piece", work.Index)
+			workQueue <- work
+			continue
+		}
+
+		resultQueue <- PieceResult{Index: work.Index, Data: pieceData}
+	}
+	return nil
+}
+
+func downloadPiece(conn net.Conn, work PieceWork) ([]byte, error) {
+	pieceBuffer := make([]byte, work.Length)
+	downloaded := 0
+
+	for downloaded < work.Length {
+		// ask for the correct block-size
+		// if the last piece is < 16kb ask for < 16kb
+		currentBlockSize := min(BlockSize, work.Length-downloaded)
+
+		// create payload, asking for piece Index
+		// range downloaded:currentBlockSize
+		payload := make([]byte, 12)
+		binary.BigEndian.PutUint32(payload[0:4], uint32(work.Index))
+		binary.BigEndian.PutUint32(payload[4:8], uint32(downloaded))
+		binary.BigEndian.PutUint32(payload[8:12], uint32(currentBlockSize))
+
+		reqMsg := Message{
+			ID:      MsgRequest,
+			Payload: payload,
+		}
+		if err := reqMsg.WriteMessage(conn); err != nil {
+			return nil, err
+		}
+
+		msg, err := ReadMessage(conn)
+		if err != nil {
+			return nil, err
+		}
+		if msg == nil {
+			continue // Keep-alive
+		}
+
+		switch msg.ID {
+		case MsgPiece:
+			// Payload is: Index (4 bytes), Begin Offset (4 bytes), Block Data (remainder)
+			if len(msg.Payload) < 8 {
+				return nil, fmt.Errorf("invalid piece payload")
+			}
+
+			// extract begin offset and data
+			beginOffset := binary.BigEndian.Uint32(msg.Payload[4:8])
+			blockData := msg.Payload[8:]
+
+			// copy and increment our downloaded counter
+			copy(pieceBuffer[beginOffset:], blockData)
+			downloaded += len(blockData)
+
+		case MsgChoke:
+			return nil, fmt.Errorf("peer choked us")
+		}
+	}
+
+	return pieceBuffer, nil
 }
