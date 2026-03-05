@@ -13,6 +13,8 @@ import (
 	"github.com/4zv4l/gbt/fs"
 )
 
+// Swarm is the struct that handle all the Peers
+// its what the workers have as context
 type Swarm struct {
 	Peers         *sync.Map
 	WorkQueue     chan PieceWork
@@ -23,9 +25,17 @@ type Swarm struct {
 	SeededCounter *atomic.Uint64
 }
 
-// AddPeer adds peer to the thread safe peers map and start the peer handling
-func (s *Swarm) AddPeer(reply TrackerReply) {
-	for _, peer := range reply.Peers {
+// startWorker add peer to the thread safe peer map
+// and start the peer handling
+func (s *Swarm) startWorker(conn net.Conn, peer netip.AddrPort) {
+	s.Peers.Store(peer, conn)
+	defer s.Peers.Delete(peer)
+	s.PeerWorker(conn)
+}
+
+// AddPeer connect to each peers, try the handshake and start their worker
+func (s *Swarm) AddPeer(peers []netip.AddrPort) {
+	for _, peer := range peers {
 		if _, exists := s.Peers.Load(peer); exists {
 			continue
 		}
@@ -33,12 +43,9 @@ func (s *Swarm) AddPeer(reply TrackerReply) {
 		go func(p netip.AddrPort) {
 			conn, err := ConnectAndHandshake(p, s.Handshake)
 			if err != nil {
-				s.Peers.Delete(p)
 				return
 			}
-			s.Peers.Store(p, conn)
-			defer s.Peers.Delete(p)
-			s.PeerWorker(conn)
+			s.startWorker(conn, p)
 		}(peer)
 	}
 }
@@ -49,7 +56,7 @@ func (s *Swarm) TrackerLoop(trackerURL string) error {
 	if err != nil {
 		return err
 	}
-	s.AddPeer(reply)
+	s.AddPeer(reply.Peers)
 
 	ticker := time.NewTicker(time.Duration(reply.Interval) * time.Second)
 
@@ -59,10 +66,12 @@ func (s *Swarm) TrackerLoop(trackerURL string) error {
 		if err != nil {
 			return err
 		}
-		s.AddPeer(reply)
+		s.AddPeer(reply.Peers)
 	}
 }
 
+// UpdatePeers send a "have" message to the peers
+// telling them we have a new piece available if they need it
 func (s *Swarm) UpdatePeers(piece PieceResult) {
 	havePayload := make([]byte, 4)
 	binary.BigEndian.PutUint32(havePayload, uint32(piece.Index))
@@ -75,21 +84,45 @@ func (s *Swarm) UpdatePeers(piece PieceResult) {
 	})
 }
 
+// handleCommonMsg processes requests and state changes that are always handled the exact same way
+func (s *Swarm) handleCommonMsg(conn net.Conn, msg *Message) error {
+	switch msg.ID {
+	case MsgNotInterested:
+		return fmt.Errorf("peer is not interested")
+	case MsgInterested:
+		unchokeMsg := Message{ID: MsgUnchoke}
+		return unchokeMsg.WriteMessage(conn)
+	case MsgRequest:
+		if len(msg.Payload) != 12 {
+			return nil
+		}
+		index := binary.BigEndian.Uint32(msg.Payload[0:4])
+		begin := binary.BigEndian.Uint32(msg.Payload[4:8])
+		length := binary.BigEndian.Uint32(msg.Payload[8:12])
+
+		blockData, err := s.Manager.ReadBlock(int(index), int(begin), int(length))
+		if err != nil {
+			return nil
+		}
+
+		replyPayload := make([]byte, 8+len(blockData))
+		binary.BigEndian.PutUint32(replyPayload[0:4], index)
+		binary.BigEndian.PutUint32(replyPayload[4:8], begin)
+		copy(replyPayload[8:], blockData)
+
+		if err := (Message{ID: MsgPiece, Payload: replyPayload}.WriteMessage(conn)); err != nil {
+			return err
+		}
+		s.SeededCounter.Add(1)
+	}
+	return nil
+}
+
 func (s *Swarm) PeerWorker(conn net.Conn) error {
 	defer conn.Close()
 
-	bitfieldMsg := Message{
-		ID:      MsgBitfield,
-		Payload: s.Bitfield.ToByte(),
-	}
-	if err := bitfieldMsg.WriteMessage(conn); err != nil {
-		return err
-	}
-
-	interestedMsg := Message{ID: MsgInterested}
-	if err := interestedMsg.WriteMessage(conn); err != nil {
-		return err
-	}
+	Message{ID: MsgBitfield, Payload: s.Bitfield.ToByte()}.WriteMessage(conn)
+	Message{ID: MsgInterested}.WriteMessage(conn)
 
 	choked := true
 	peerBitfield := Bitfield{}
@@ -112,13 +145,10 @@ func (s *Swarm) PeerWorker(conn net.Conn) error {
 			choked = false
 		case MsgChoke:
 			choked = true
-		case MsgInterested:
-			unchokeMsg := Message{ID: MsgUnchoke}
-			if err := unchokeMsg.WriteMessage(conn); err != nil {
+		default:
+			if err := s.handleCommonMsg(conn, msg); err != nil {
 				return err
 			}
-		case MsgNotInterested:
-			return fmt.Errorf("peer %v is not interested", conn.RemoteAddr())
 		}
 	}
 
@@ -132,36 +162,7 @@ func (s *Swarm) PeerWorker(conn net.Conn) error {
 			if msg == nil {
 				continue
 			}
-
-			switch msg.ID {
-			case MsgInterested:
-				unchokeMsg := Message{ID: MsgUnchoke}
-				unchokeMsg.WriteMessage(conn)
-
-			case MsgRequest:
-				if len(msg.Payload) != 12 {
-					continue
-				}
-
-				index := binary.BigEndian.Uint32(msg.Payload[0:4])
-				begin := binary.BigEndian.Uint32(msg.Payload[4:8])
-				length := binary.BigEndian.Uint32(msg.Payload[8:12])
-
-				blockData, err := s.Manager.ReadBlock(int(index), int(begin), int(length))
-				if err != nil {
-					continue // ignore if failed to read
-				}
-
-				replyPayload := make([]byte, 8+len(blockData))
-				binary.BigEndian.PutUint32(replyPayload[0:4], index)
-				binary.BigEndian.PutUint32(replyPayload[4:8], begin)
-				copy(replyPayload[8:], blockData)
-
-				replyMsg := Message{ID: MsgPiece, Payload: replyPayload}
-				replyMsg.WriteMessage(conn)
-				s.SeededCounter.Add(1)
-
-			}
+			s.handleCommonMsg(conn, msg)
 		}
 	}
 
@@ -190,10 +191,11 @@ func (s *Swarm) PeerWorker(conn net.Conn) error {
 }
 
 func (s *Swarm) downloadPiece(conn net.Conn, work PieceWork) ([]byte, error) {
-	pieceBuffer := make([]byte, work.Length)
-
-	requested := 0 // Tracks what we have asked
-	pipeline := 0
+	var (
+		pieceBuffer = make([]byte, work.Length)
+		requested   = 0 // track what we have already asked (index)
+		pipeline    = 0
+	)
 
 	for requested < work.Length || pipeline > 0 {
 
@@ -225,9 +227,6 @@ func (s *Swarm) downloadPiece(conn net.Conn, work PieceWork) ([]byte, error) {
 		}
 
 		switch msg.ID {
-		case MsgInterested:
-			unchokeMsg := Message{ID: MsgUnchoke}
-			unchokeMsg.WriteMessage(conn)
 		case MsgPiece:
 			if len(msg.Payload) < 8 {
 				return nil, fmt.Errorf("invalid piece payload")
@@ -238,30 +237,10 @@ func (s *Swarm) downloadPiece(conn net.Conn, work PieceWork) ([]byte, error) {
 
 			copy(pieceBuffer[beginOffset:], blockData)
 			pipeline--
-		case MsgRequest: // seeding
-			if len(msg.Payload) != 12 {
-				continue
+		default:
+			if err := s.handleCommonMsg(conn, msg); err != nil {
+				return nil, err
 			}
-
-			index := binary.BigEndian.Uint32(msg.Payload[0:4])
-			begin := binary.BigEndian.Uint32(msg.Payload[4:8])
-			length := binary.BigEndian.Uint32(msg.Payload[8:12])
-
-			blockData, err := s.Manager.ReadBlock(int(index), int(begin), int(length))
-			if err != nil {
-				continue // ignore if failed to read
-			}
-
-			replyPayload := make([]byte, 8+len(blockData))
-			binary.BigEndian.PutUint32(replyPayload[0:4], index)
-			binary.BigEndian.PutUint32(replyPayload[4:8], begin)
-			copy(replyPayload[8:], blockData)
-
-			replyMsg := Message{ID: MsgPiece, Payload: replyPayload}
-			replyMsg.WriteMessage(conn)
-			s.SeededCounter.Add(1)
-		case MsgChoke:
-			return nil, fmt.Errorf("peer choked us in the middle of a piece")
 		}
 	}
 
@@ -284,21 +263,12 @@ func (s *Swarm) StartActiveSeeding(port int) error {
 		go func(c net.Conn) {
 			defer c.Close()
 
-			theirHandshake, err := ReadHandshake(c)
-			if err != nil {
+			if err := handleHandshake(conn, s.Handshake); err != nil {
 				return
 			}
 
-			// if they dont ask for the same torrent as us
-			if theirHandshake.InfoHash != s.Handshake.InfoHash {
-				return
-			}
-
-			if _, err := c.Write(s.Handshake.ToByte()); err != nil {
-				return
-			}
-
-			s.PeerWorker(c)
+			addrPort, _ := netip.ParseAddrPort(conn.RemoteAddr().String())
+			s.startWorker(conn, addrPort)
 		}(conn)
 	}
 }

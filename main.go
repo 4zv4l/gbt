@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -21,6 +22,7 @@ import (
 	"github.com/4zv4l/gbt/torrent"
 )
 
+// gracefully handle ctrl-c
 func setupGracefulShutdown(cancel context.CancelFunc) {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
@@ -76,14 +78,14 @@ func downloadLoop(t *torrent.TorrentFile, peerID [20]byte, trackerURL string, po
 
 	setupGracefulShutdown(cancel)
 
-	// prepare files
+	// prepare files (pre-create)
 	pm, err := fs.NewPieceManager(t.Files, t.PieceLength)
 	if err != nil {
 		return err
 	}
 	defer pm.Close()
 
-	// setup swamp
+	// setup swamp that handles the workers
 	swarm := &bittorrent.Swarm{
 		Peers:         &sync.Map{},
 		WorkQueue:     workQueue,
@@ -102,12 +104,8 @@ func downloadLoop(t *torrent.TorrentFile, peerID [20]byte, trackerURL string, po
 		go swarm.StartActiveSeeding(port)
 	}
 
-	// can add local peer
-	if len(directPeers) > 0 {
-		mockReply := bittorrent.TrackerReply{Peers: directPeers}
-		swarm.AddPeer(mockReply)
-	}
-	// start finding peers in the background
+	// getting peers, local through cli or through tracker
+	swarm.AddPeer(directPeers)
 	go swarm.TrackerLoop(trackerURL)
 
 	// receive and write pieces
@@ -129,17 +127,15 @@ func downloadLoop(t *torrent.TorrentFile, peerID [20]byte, trackerURL string, po
 			completedPieces[piece.Index] = true
 			downloadedPieces++
 
-			// update peers
+			// tell peers we got a new piece available to seed
 			swarm.UpdatePeers(piece)
-
-			seeded := seededBlocks.Load()
-			fmt.Fprintf(os.Stderr, "\rDownloaded: %d/%d pieces | Seeded: %d blocks", downloadedPieces, totalPieces, seeded)
+			fmt.Fprintf(os.Stderr, "\rDownloaded: %d/%d pieces | Seeded: %d blocks", downloadedPieces, totalPieces, seededBlocks.Load())
 		}
 	}
 
+	// continue running if -seed is given
+	// keep a status on how many blocks we are seeding
 	if seed {
-		log.Printf("Download 100%% complete, seeding...")
-
 		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
 
@@ -157,6 +153,9 @@ func downloadLoop(t *torrent.TorrentFile, peerID [20]byte, trackerURL string, po
 	return nil
 }
 
+// parsePeers parses addresses like
+// 127.0.0.1:6881,superhost.com:8866,10.10.10.5:9988
+// into a list of AddrPort ready to be used by bittorrent.AddPeer
 func parsePeers(strPeers string) ([]netip.AddrPort, error) {
 	var peers []netip.AddrPort
 	if strPeers == "" {
@@ -164,7 +163,12 @@ func parsePeers(strPeers string) ([]netip.AddrPort, error) {
 	}
 
 	for _, strPeer := range strings.Split(strPeers, ",") {
-		peer, err := netip.ParseAddrPort(strPeer)
+		host, port, _ := net.SplitHostPort(strPeer)
+		addrs, err := net.LookupHost(host)
+		if err != nil {
+			return nil, err
+		}
+		peer, err := netip.ParseAddrPort(fmt.Sprintf("%s:%s", addrs[0], port))
 		if err != nil {
 			return nil, err
 		}
