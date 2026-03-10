@@ -65,6 +65,7 @@ func verifyAndFillQueue(t *torrent.TorrentFile, s *bittorrent.Swarm, completedPi
 
 func downloadLoop(t *torrent.TorrentFile, peerID [20]byte, trackerURL string, port int, seed bool, directPeers []netip.AddrPort) error {
 	var (
+		start            = time.Now()
 		totalPieces      = len(t.Pieces)
 		downloadedPieces = 0
 		completedPieces  = map[int]bool{}
@@ -150,6 +151,8 @@ func downloadLoop(t *torrent.TorrentFile, peerID [20]byte, trackerURL string, po
 		}
 	}
 
+	fmt.Fprintf(os.Stderr, "\r\033[K")
+	log.Printf("Download completed in %v", time.Since(start))
 	return nil
 }
 
@@ -178,7 +181,6 @@ func parsePeers(strPeers string) ([]netip.AddrPort, error) {
 }
 
 func main() {
-	start := time.Now()
 	filepath := flag.String("file", "", "torrent file to download")
 	port := flag.Int("port", -1, "port to listen for peers (<=0 to not listen)")
 	seed := flag.Bool("seed", false, "keep running and seeding after download completes")
@@ -229,6 +231,4 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed download: %v", err)
 	}
-	fmt.Println()
-	log.Printf("Download completed in %v", time.Since(start))
 }
