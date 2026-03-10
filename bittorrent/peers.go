@@ -36,7 +36,7 @@ func handleHandshake(conn net.Conn, handshake Handshake) error {
 	return nil
 }
 
-func ConnectAndHandshake(peer netip.AddrPort, handshake Handshake) (net.Conn, error) {
+func connectAndHandshake(peer netip.AddrPort, handshake Handshake) (net.Conn, error) {
 	conn, err := net.DialTimeout("tcp", peer.String(), 3*time.Second)
 	if err != nil {
 		return nil, err
@@ -46,4 +46,22 @@ func ConnectAndHandshake(peer netip.AddrPort, handshake Handshake) (net.Conn, er
 		return nil, err
 	}
 	return conn, nil
+}
+
+// AddPeer connect to each peers, do the handshake and start their worker
+func (s *Swarm) AddPeer(peers []netip.AddrPort) {
+	for _, peer := range peers {
+		if _, exists := s.Peers.Load(peer); exists {
+			continue
+		}
+
+		go func(p netip.AddrPort) {
+			conn, err := connectAndHandshake(p, s.Handshake)
+			if err != nil {
+				return
+			}
+			defer conn.Close()
+			s.startWorker(conn, p)
+		}(peer)
+	}
 }

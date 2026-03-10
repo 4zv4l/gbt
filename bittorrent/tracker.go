@@ -3,11 +3,13 @@ package bittorrent
 import (
 	"encoding/binary"
 	"fmt"
-	"github.com/4zv4l/gbt/bencode"
 	"io"
 	"net/http"
 	"net/netip"
 	"strings"
+	"time"
+
+	"github.com/4zv4l/gbt/bencode"
 )
 
 type TrackerReply struct {
@@ -54,4 +56,24 @@ func GetPeersFromTracker(trackerUrl string) (TrackerReply, error) {
 		Interval: reply["interval"].(int),
 		Peers:    rawPeersToAddrPort([]byte(reply["peers"].(string))),
 	}, nil
+}
+
+// TrackerLoop will request new peers from tracker and start a goroutine for each new peer to be ready to download
+func (s *Swarm) TrackerLoop(trackerURL string) error {
+	reply, err := GetPeersFromTracker(trackerURL)
+	if err != nil {
+		return err
+	}
+	s.AddPeer(reply.Peers)
+
+	ticker := time.NewTicker(time.Duration(reply.Interval) * time.Second)
+
+	for {
+		<-ticker.C
+		reply, err := GetPeersFromTracker(trackerURL)
+		if err != nil {
+			return err
+		}
+		s.AddPeer(reply.Peers)
+	}
 }

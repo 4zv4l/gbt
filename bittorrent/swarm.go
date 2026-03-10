@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/4zv4l/gbt/fs"
+	"github.com/4zv4l/gbt/torrent"
 )
 
-// Swarm is the struct that handle all the Peers
-// its what the workers have as context
+// Swarm is the struct that handle all the Peers and contains their context
 type Swarm struct {
 	Peers         *sync.Map
 	WorkQueue     chan PieceWork
@@ -30,44 +30,7 @@ type Swarm struct {
 func (s *Swarm) startWorker(conn net.Conn, peer netip.AddrPort) {
 	s.Peers.Store(peer, conn)
 	defer s.Peers.Delete(peer)
-	s.PeerWorker(conn)
-}
-
-// AddPeer connect to each peers, try the handshake and start their worker
-func (s *Swarm) AddPeer(peers []netip.AddrPort) {
-	for _, peer := range peers {
-		if _, exists := s.Peers.Load(peer); exists {
-			continue
-		}
-
-		go func(p netip.AddrPort) {
-			conn, err := ConnectAndHandshake(p, s.Handshake)
-			if err != nil {
-				return
-			}
-			s.startWorker(conn, p)
-		}(peer)
-	}
-}
-
-// TrackerLoop will request new peers from tracker and start a goroutine for each new peer to be ready to download
-func (s *Swarm) TrackerLoop(trackerURL string) error {
-	reply, err := GetPeersFromTracker(trackerURL)
-	if err != nil {
-		return err
-	}
-	s.AddPeer(reply.Peers)
-
-	ticker := time.NewTicker(time.Duration(reply.Interval) * time.Second)
-
-	for {
-		<-ticker.C
-		reply, err := GetPeersFromTracker(trackerURL)
-		if err != nil {
-			return err
-		}
-		s.AddPeer(reply.Peers)
-	}
+	s.work(conn)
 }
 
 // UpdatePeers send a "have" message to the peers
@@ -84,43 +47,38 @@ func (s *Swarm) UpdatePeers(piece PieceResult) {
 	})
 }
 
-// handleCommonMsg processes requests and state changes that are always handled the exact same way
-func (s *Swarm) handleCommonMsg(conn net.Conn, msg *Message) error {
-	switch msg.ID {
-	case MsgNotInterested:
-		return fmt.Errorf("peer is not interested")
-	case MsgInterested:
-		unchokeMsg := Message{ID: MsgUnchoke}
-		return unchokeMsg.WriteMessage(conn)
-	case MsgRequest:
-		if len(msg.Payload) != 12 {
-			return nil
-		}
-		index := binary.BigEndian.Uint32(msg.Payload[0:4])
-		begin := binary.BigEndian.Uint32(msg.Payload[4:8])
-		length := binary.BigEndian.Uint32(msg.Payload[8:12])
-
-		blockData, err := s.Manager.ReadBlock(int(index), int(begin), int(length))
-		if err != nil {
-			return nil
+// check if part of the file are already on disk
+// if not add the part to the WorkQueue
+func (s Swarm) WithResume(t *torrent.TorrentFile, completedPieces map[int]bool, downloadedPieces *int) *Swarm {
+	for i, hash := range t.Pieces {
+		length := t.PieceLength
+		if i == len(t.Pieces)-1 {
+			if remainder := t.TotalLength % t.PieceLength; remainder != 0 {
+				length = remainder
+			}
 		}
 
-		replyPayload := make([]byte, 8+len(blockData))
-		binary.BigEndian.PutUint32(replyPayload[0:4], index)
-		binary.BigEndian.PutUint32(replyPayload[4:8], begin)
-		copy(replyPayload[8:], blockData)
-
-		if err := (Message{ID: MsgPiece, Payload: replyPayload}.WriteMessage(conn)); err != nil {
-			return err
+		data, err := s.Manager.ReadPiece(i, length)
+		if err == nil && sha1.Sum(data) == hash {
+			completedPieces[i] = true
+			*downloadedPieces++
+			s.Bitfield.SetPiece(i)
+		} else {
+			s.WorkQueue <- PieceWork{
+				Index:  i,
+				Hash:   hash[:],
+				Length: length,
+			}
 		}
-		s.SeededCounter.Add(1)
 	}
-	return nil
+	return &s
 }
 
-func (s *Swarm) PeerWorker(conn net.Conn) error {
-	defer conn.Close()
-
+// Work send Bitfield and Interested Message
+// then wait to be unchoked or to receive Bitfield
+// it will then start downloading pieces from the WorkQueue
+// or start seeding if the queue is empty
+func (s *Swarm) work(conn net.Conn) error {
 	Message{ID: MsgBitfield, Payload: s.Bitfield.ToByte()}.WriteMessage(conn)
 	Message{ID: MsgInterested}.WriteMessage(conn)
 
@@ -247,6 +205,8 @@ func (s *Swarm) downloadPiece(conn net.Conn, work PieceWork) ([]byte, error) {
 	return pieceBuffer, nil
 }
 
+// StartActiveSeeding start seeding server
+// and return the port used (in case the given port is 0)
 func (s *Swarm) StartActiveSeeding(port int) error {
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
@@ -260,8 +220,8 @@ func (s *Swarm) StartActiveSeeding(port int) error {
 			continue
 		}
 
-		go func(c net.Conn) {
-			defer c.Close()
+		go func() {
+			defer conn.Close()
 
 			if err := handleHandshake(conn, s.Handshake); err != nil {
 				return
@@ -269,6 +229,6 @@ func (s *Swarm) StartActiveSeeding(port int) error {
 
 			addrPort, _ := netip.ParseAddrPort(conn.RemoteAddr().String())
 			s.startWorker(conn, addrPort)
-		}(conn)
+		}()
 	}
 }

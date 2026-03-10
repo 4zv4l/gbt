@@ -20,7 +20,6 @@ func (bf Bitfield) SetPiece(index int) {
 }
 
 // Thread-safe Bitfield
-
 type SharedBitfield struct {
 	mu   sync.RWMutex
 	data []byte
