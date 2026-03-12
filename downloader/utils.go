@@ -1,33 +1,16 @@
-package main
+package downloader
 
 import (
-	"context"
 	"fmt"
-	"log"
 	"net"
 	"net/netip"
-	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 )
-
-// gracefully handle ctrl-c
-func setupGracefulShutdown(cancel context.CancelFunc) {
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-sigChan
-		fmt.Fprintf(os.Stderr, "\r\033[K")
-		log.Printf("Ctrl-C pressed, shutting down...")
-		cancel()
-	}()
-}
 
 // parsePeers parses addresses like
 // 127.0.0.1:6881,superhost.com:8866,10.10.10.5:9988
 // into a list of AddrPort ready to be used by bittorrent.AddPeer
-func parsePeers(strPeers string) ([]netip.AddrPort, error) {
+func ParsePeers(strPeers string) ([]netip.AddrPort, error) {
 	var peers []netip.AddrPort
 	if strPeers == "" {
 		return []netip.AddrPort{}, nil
@@ -46,4 +29,18 @@ func parsePeers(strPeers string) ([]netip.AddrPort, error) {
 		peers = append(peers, peer)
 	}
 	return peers, nil
+}
+
+// FormatBytes show bytes in Human Readable Format
+func FormatBytes(b int) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }

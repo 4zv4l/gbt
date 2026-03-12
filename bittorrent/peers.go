@@ -7,9 +7,6 @@ import (
 	"time"
 )
 
-const BlockSize = 16384 // 16 KB is the BitTorrent block size
-var MaxPipeline int = 5 // send MaxPipeline requests (for 16kb block) at a time
-
 type PieceWork struct {
 	Index  int
 	Hash   []byte

@@ -14,6 +14,8 @@ import (
 	"github.com/4zv4l/gbt/torrent"
 )
 
+const BlockSize = 16384 // 16 KB is the BitTorrent block size
+
 // Swarm is the struct that handle all the Peers and contains their context
 type Swarm struct {
 	Peers         *sync.Map
@@ -23,6 +25,7 @@ type Swarm struct {
 	Bitfield      *SharedBitfield
 	Handshake     Handshake
 	SeededCounter *atomic.Uint64
+	MaxPipeline   int
 }
 
 // startWorker add peer to the thread safe peer map
@@ -49,7 +52,7 @@ func (s *Swarm) UpdatePeers(piece PieceResult) {
 
 // check if part of the file are already on disk
 // if not add the part to the WorkQueue
-func (s Swarm) WithResume(t *torrent.TorrentFile, completedPieces map[int]bool, downloadedPieces *int) *Swarm {
+func (s *Swarm) WithResume(t *torrent.TorrentFile, completedPieces map[int]bool, downloadedPieces *int) *Swarm {
 	for i, hash := range t.Pieces {
 		length := t.PieceLength
 		if i == len(t.Pieces)-1 {
@@ -71,7 +74,7 @@ func (s Swarm) WithResume(t *torrent.TorrentFile, completedPieces map[int]bool, 
 			}
 		}
 	}
-	return &s
+	return s
 }
 
 // Work send Bitfield and Interested Message
@@ -158,7 +161,7 @@ func (s *Swarm) downloadPiece(conn net.Conn, work PieceWork) ([]byte, error) {
 	for requested < work.Length || pipeline > 0 {
 
 		// fire off requests until we have MaxPipeline pending, or we reach the end of the piece
-		for pipeline < MaxPipeline && requested < work.Length {
+		for pipeline < s.MaxPipeline && requested < work.Length {
 			currentBlockSize := min(BlockSize, work.Length-requested)
 
 			// Idx(4b) + StartOff(4b) + EndOff(4b)

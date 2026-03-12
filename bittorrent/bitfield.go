@@ -35,6 +35,7 @@ func NewSharedBitfield(totalPieces int) *SharedBitfield {
 func (sb *SharedBitfield) SetPiece(index int) {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
+
 	byteIndex := index / 8
 	offset := index % 8
 	if byteIndex >= 0 && byteIndex < len(sb.data) {
