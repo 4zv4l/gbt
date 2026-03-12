@@ -15,7 +15,7 @@ import (
 	"github.com/4zv4l/gbt/bencode"
 )
 
-// File represents a single file inside the torrent.
+// File represents a single file inside the torrent
 type File struct {
 	Length int
 	Path   string
@@ -31,7 +31,7 @@ type TorrentFile struct {
 	TotalLength int        // Total size of all files combined
 }
 
-// Parse takes a raw byte slice of a .torrent file and extracts the data.
+// Parse takes a raw byte slice of a .torrent file and extracts the data
 func Parse(data []byte) (*TorrentFile, error) {
 	val, err := bencode.Decode(bytes.NewReader(data))
 	if err != nil {
@@ -134,7 +134,7 @@ func (t *TorrentFile) TrackerURL(peerID [20]byte, port int) (string, error) {
 	return uri.String(), nil
 }
 
-// calculateInfoHash re-encodes the info dictionary and calculates its SHA-1 hash.
+// calculateInfoHash re-encodes the info dictionary and calculates its SHA-1 hash
 func calculateInfoHash(info map[string]any) ([20]byte, error) {
 	var buf bytes.Buffer
 	if err := bencode.Encode(&buf, info); err != nil {

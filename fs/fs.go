@@ -71,10 +71,11 @@ sliceEnd        := overlapEnd (130)   - pieceGlobalStart (80) 		// Result: 50
 dataToWrite     := piece.Data[20:50]
 localFileOffset := overlapStart (100) - fileGlobalStart (100) 		// Result: 0
 */
-// FileOp defines the callback executed when an overlap is found.
+
+// FileOp defines the callback executed when an overlap is found
 type FileOp func(f *FileEntry, sliceStart, sliceEnd, localFileOffset int) error
 
-// operateOnOverlaps handles the complex math of slicing a global offset across multiple file boundaries.
+// operateOnOverlaps handles the complex math of slicing a global offset across multiple file boundaries
 func (pm *PieceManager) operateOnOverlaps(globalStart, targetLength int, op FileOp) error {
 	globalEnd := globalStart + targetLength
 
@@ -100,7 +101,6 @@ func (pm *PieceManager) operateOnOverlaps(globalStart, targetLength int, op File
 	return nil
 }
 
-// Write handles the complex math of slicing a piece across multiple file boundaries.
 func (pm *PieceManager) Write(index int, data []byte) error {
 	globalStart := index * pm.pieceLength
 

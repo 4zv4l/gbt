@@ -42,7 +42,6 @@ func main() {
 		pipelineSize = flag.Int("pipeline", 5, "pipeline size for peer request")
 		ctx, cancel  = signal.NotifyContext(context.Background(), os.Interrupt)
 	)
-	//flag.IntVar(&bittorrent.MaxPipeline, "pipeline", 5, "pipeline size for peer request")
 	defer cancel()
 
 	flag.Parse()
