@@ -95,7 +95,6 @@ func Download(
 
 	go func() {
 		defer close(progressCH)
-		defer close(errCH)
 
 		// prepare files (pre-create)
 		pm, err := fs.NewPieceManager(t.Files, t.PieceLength)

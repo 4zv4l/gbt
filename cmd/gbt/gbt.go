@@ -22,8 +22,8 @@ func eventLoop(progressCH chan downloader.Progress, errCH chan error) error {
 		case err := <-errCH:
 			fmt.Printf("\r\033[K")
 			return err
-		case p, ok := <-progressCH:
-			if !ok {
+		case p, isOpen := <-progressCH:
+			if !isOpen {
 				fmt.Printf("\r\033[K")
 				fmt.Printf("Download completed in %v\n", time.Since(start))
 				return nil
